@@ -2,7 +2,7 @@
 """
 小学作文评分系统 v2.0
 - 普通模式：KIMI-2.5 多模态识图直接评分
-- 专家模式：KIMI识图评分 + 豆包评分 + GLM-5仲裁
+- 专家模式：KIMI识图评分 + 豆包评分 + DeepSeek-V3.2仲裁
 """
 
 import json
@@ -15,9 +15,9 @@ from openai import OpenAI
 
 # 模型配置
 MODELS = {
-    "glm-5": {
+    "deepseek": {
         "provider": "joybuilder",
-        "model": "GLM-5",
+        "model": "DeepSeek-V3.2",
         "base_url": "https://modelservice.jdcloud.com/coding/openai/v1",
         "api_key": "pk-ad5e8fc9-6548-485a-b886-31e872a1dded"
     },
@@ -41,9 +41,9 @@ MODELS = {
     }
 }
 
-# 评分标准（含卷面分）
+# 评分标准（满分30分，无卷面分）
 GRADING_CRITERIA = """
-## 评分标准（满分32分）
+## 评分标准（满分30分）
 
 | 维度 | 分值 | 评分要点 |
 |------|------|----------|
@@ -52,14 +52,13 @@ GRADING_CRITERIA = """
 | 结构层次 | 6分 | 条理清晰、段落分明、过渡自然、首尾呼应 |
 | 书写规范 | 4分 | 字迹工整、标点正确、格式规范、错别字少 |
 | 字数要求 | 2分 | 达到字数要求（400字以上） |
-| 卷面分 | 2分 | 书写整洁、卷面干净、无涂改痕迹 |
 
 ## 等级划分
-- 29-32分: 一类文·优秀
-- 25-28分: 二类文·良好
-- 19-24分: 三类文·中等
-- 13-18分: 四类文·及格
-- 0-12分: 五类文·不及格
+- 27-30分: 一类文·优秀
+- 23-26分: 二类文·良好
+- 17-22分: 三类文·中等
+- 11-16分: 四类文·及格
+- 0-10分: 五类文·不及格
 """
 
 
@@ -79,15 +78,30 @@ def encode_image(image_path):
 
 
 def parse_json_response(content):
-    """解析 JSON 响应，处理代码块包裹"""
+    """解析 JSON 响应，处理代码块包裹和各种格式问题"""
     # 去掉代码块标记
     content = re.sub(r'^```(?:json)?\s*', '', content.strip())
     content = re.sub(r'\s*```$', '', content)
     content = content.strip()
     
+    # 尝试提取 JSON 对象
     json_match = re.search(r'\{[\s\S]*\}', content)
     if json_match:
-        return json.loads(json_match.group())
+        json_str = json_match.group()
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            # 尝试修复常见的 JSON 格式问题
+            json_str_fixed = json_str.replace("'", '"')
+            json_str_fixed = re.sub(r',\s*}', '}', json_str_fixed)
+            json_str_fixed = re.sub(r',\s*]', ']', json_str_fixed)
+            json_str_fixed = re.sub(r'(\w+)\s*:', r'"\1":', json_str_fixed)
+            try:
+                return json.loads(json_str_fixed)
+            except Exception as e2:
+                print(f"JSON 解析失败，原始响应前500字符:\n{content[:500]}")
+                return {"error": f"JSON解析失败: {e}, {e2}", "raw_response": content}
+    print(f"未找到 JSON 对象，原始响应前500字符:\n{content[:500]}")
     return {"error": "无法解析JSON", "raw_response": content}
 
 
@@ -95,15 +109,15 @@ def kimi_grade_image(image_path, requirements=None, essay_title=None):
     """使用 KIMI-2.5 多模态识图并评分"""
     client, model = get_client("kimi")
     
-    # 编码图片
     image_base64 = encode_image(image_path)
+    title_req = f'题目为"**{essay_title}**"，{requirements or "请根据题目要求进行评分"}'
     
     prompt = f"""你是一位资深的小学语文教研员，请对图片中的手写作文进行评分。
 
 {GRADING_CRITERIA}
 
 ## 作文要求
-{requirements or '以"追"为话题，写一篇记叙文，通过具体的事例讲述你追逐的往事。字数400字以上。'}
+{title_req}
 
 请完成以下任务：
 1. 识别并提取作文的全部文字内容（标题和正文）
@@ -126,8 +140,7 @@ def kimi_grade_image(image_path, requirements=None, essay_title=None):
         "语言表达": {{"score": <0-8>, "deduction_reasons": ["<扣分原因>"]}},
         "结构层次": {{"score": <0-6>, "deduction_reasons": ["<扣分原因>"]}},
         "书写规范": {{"score": <0-4>, "deduction_reasons": ["<扣分原因>"]}},
-        "字数要求": {{"score": <0-2>, "deduction_reasons": ["<扣分原因>"]}},
-        "卷面分": {{"score": <0-2>, "deduction_reasons": ["<扣分原因>"]}}
+        "字数要求": {{"score": <0-2>, "deduction_reasons": ["<扣分原因>"]}}
     }},
     "total_score": <总分>,
     "grade": "<等级>",
@@ -186,18 +199,18 @@ def kimi_grade_image(image_path, requirements=None, essay_title=None):
 
 
 def doubao_vision_grade_image(image_path, requirements=None, essay_title=None):
-    """使用豆包视觉模型识图并评分"""
+    """使用豆包 Vision 识图并评分"""
     client, model = get_client("doubao-vision")
     
-    # 编码图片
     image_base64 = encode_image(image_path)
+    title_req = f'题目为"**{essay_title}**"，{requirements or "请根据题目要求进行评分"}'
     
     prompt = f"""你是一位资深的小学语文教研员，请对图片中的手写作文进行评分。
 
 {GRADING_CRITERIA}
 
 ## 作文要求
-{requirements or '以"追"为话题，写一篇记叙文，通过具体的事例讲述你追逐的往事。字数400字以上。'}
+{title_req}
 
 请完成以下任务：
 1. 识别并提取作文的全部文字内容（标题和正文）
@@ -220,8 +233,7 @@ def doubao_vision_grade_image(image_path, requirements=None, essay_title=None):
         "语言表达": {{"score": <0-8>, "deduction_reasons": ["<扣分原因>"]}},
         "结构层次": {{"score": <0-6>, "deduction_reasons": ["<扣分原因>"]}},
         "书写规范": {{"score": <0-4>, "deduction_reasons": ["<扣分原因>"]}},
-        "字数要求": {{"score": <0-2>, "deduction_reasons": ["<扣分原因>"]}},
-        "卷面分": {{"score": <0-2>, "deduction_reasons": ["<扣分原因>"]}}
+        "字数要求": {{"score": <0-2>, "deduction_reasons": ["<扣分原因>"]}}
     }},
     "total_score": <总分>,
     "grade": "<等级>",
@@ -279,109 +291,16 @@ def doubao_vision_grade_image(image_path, requirements=None, essay_title=None):
         }
 
 
-def kimi_extract_and_grade(image_path, requirements=None, essay_title=None):
-    """KIMI-2.5 识图提取正文 + 评分（专家模式用）"""
-    return kimi_grade_image(image_path, requirements, essay_title)
-
-
-def doubao_grade_text(essay_text, requirements=None, essay_title=None):
-    """豆包评分（文本输入）"""
-    client, model = get_client("doubao")
-    
-    char_count = len(re.findall(r'[\u4e00-\u9fa5a-zA-Z0-9]', essay_text))
-    
-    prompt = f"""你是一位资深的小学语文教研员，请对以下作文进行专业评分。
-
-{GRADING_CRITERIA}
-
-## 作文要求
-{requirements or '以"追"为话题，写一篇记叙文，通过具体的事例讲述你追逐的往事。字数400字以上。'}
-
-## 字数统计
-- 实际字数：约 {char_count} 字
-- 要求字数：400 字左右
-- {"✅ 符合要求" if char_count >= 400 else f"❌ 不足（差{400 - char_count}字）"}
-
-## 作文内容
-标题：{essay_title or '(未提供标题)'}
-
-正文：
-{essay_text}
-
----
-
-请按以下JSON格式返回（只返回JSON，不要其他内容）：
-{{
-    "conformity_check": {{
-        "is_on_topic": true/false,
-        "writing_techniques_used": ["<已使用的写作手法>"],
-        "writing_techniques_missing": ["<缺少的写作手法>"],
-        "topic_analysis": "<题意分析>"
-    }},
-    "scores": {{
-        "内容质量": {{"score": <0-10>, "deduction_reasons": ["<扣分原因>"]}},
-        "语言表达": {{"score": <0-8>, "deduction_reasons": ["<扣分原因>"]}},
-        "结构层次": {{"score": <0-6>, "deduction_reasons": ["<扣分原因>"]}},
-        "书写规范": {{"score": <0-4>, "deduction_reasons": ["<扣分原因>"]}},
-        "字数要求": {{"score": <0-2>, "deduction_reasons": ["<扣分原因>"]}},
-        "卷面分": {{"score": <0-2>, "deduction_reasons": ["<扣分原因，根据文本推测>"]}}
-    }},
-    "total_score": <总分>,
-    "grade": "<等级>",
-    "highlights": [
-        {{"point": "<亮点标题>", "detail": "<详细说明>", "example": "<原文引用>"}}
-    ],
-    "issues": [
-        {{"point": "<问题标题>", "detail": "<详细说明>", "deduction": "<扣分说明>", "example": "<有问题的原文>"}}
-    ],
-    "summary": "<总结评语>"
-}}
-"""
-
-    start_time = time.time()
-    
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=3000
-        )
-        
-        elapsed = time.time() - start_time
-        content = response.choices[0].message.content
-        result = parse_json_response(content)
-        
-        return {
-            "model": "doubao",
-            "result": result,
-            "char_count": char_count,
-            "elapsed_seconds": round(elapsed, 2),
-            "tokens": {
-                "prompt": response.usage.prompt_tokens,
-                "completion": response.usage.completion_tokens,
-                "total": response.usage.total_tokens
-            }
-        }
-        
-    except Exception as e:
-        return {
-            "model": "doubao",
-            "error": str(e),
-            "elapsed_seconds": time.time() - start_time
-        }
-
-
-def glm5_arbitrate(kimi_result, doubao_result, essay_text, requirements=None):
-    """GLM-5 仲裁 KIMI 和豆包的评分"""
-    client, model = get_client("glm-5")
+def deepseek_arbitrate(kimi_result, doubao_result, essay_text, requirements=None, essay_title=None):
+    """DeepSeek-V3.2 仲裁 KIMI 和豆包的评分"""
+    client, model = get_client("deepseek")
     
     prompt = f"""你是一位教育专家，现在需要对两个AI模型的小学作文评分结果进行仲裁，给出最终评分。
 
 {GRADING_CRITERIA}
 
 ## 作文要求
-{requirements or '以"追"为话题，写一篇记叙文'}
+题目为"**{essay_title}**"，{requirements or '以"追"为话题，写一篇记叙文'}
 
 ## 作文内容
 {essay_text[:1500]}
@@ -389,7 +308,7 @@ def glm5_arbitrate(kimi_result, doubao_result, essay_text, requirements=None):
 ## 模型A（KIMI-2.5，多模态识图评分）的评分结果：
 {json.dumps(kimi_result, ensure_ascii=False, indent=2)}
 
-## 模型B（豆包）的评分结果：
+## 模型B（豆包 Vision）的评分结果：
 {json.dumps(doubao_result, ensure_ascii=False, indent=2)}
 
 ---
@@ -414,8 +333,7 @@ def glm5_arbitrate(kimi_result, doubao_result, essay_text, requirements=None):
         "语言表达": {{"score": <0-8>, "deduction_reasons": ["<扣分原因>"]}},
         "结构层次": {{"score": <0-6>, "deduction_reasons": ["<扣分原因>"]}},
         "书写规范": {{"score": <0-4>, "deduction_reasons": ["<扣分原因>"]}},
-        "字数要求": {{"score": <0-2>, "deduction_reasons": ["<扣分原因>"]}},
-        "卷面分": {{"score": <0-2>, "deduction_reasons": ["<扣分原因>"]}}
+        "字数要求": {{"score": <0-2>, "deduction_reasons": ["<扣分原因>"]}}
     }},
     "final_total": <总分>,
     "final_grade": "<等级>",
@@ -466,251 +384,83 @@ def format_single_report(result, requirements=None):
     r = result["result"]
     char_count = r.get("char_count", 0)
     
-    word_status = "✅ 符合要求" if char_count >= 400 else f"❌ 不足（差{400 - char_count}字）"
+    scores = r.get("scores", {})
     
     lines = []
-    lines.append("📝 小学作文评分分析（按专业标准）")
+    lines.append(f"## 评分结果\n")
+    lines.append(f"**题目**: {r.get('essay_title', 'N/A')}")
+    lines.append(f"**字数**: 约 {char_count} 字")
+    lines.append(f"**总分**: {r.get('total_score', 'N/A')} 分 ({r.get('grade', 'N/A')})")
     lines.append("")
+    lines.append("### 各项得分")
     
-    # 1、字数统计
-    lines.append("1、字数统计")
-    lines.append(f"约 {char_count} 字（要求 400 字左右）{word_status}")
+    max_scores = {"内容质量": 10, "语言表达": 8, "结构层次": 6, "书写规范": 4, "字数要求": 2}
+    for dim, max_s in max_scores.items():
+        score_info = scores.get(dim, {})
+        score = score_info.get("score", "N/A")
+        reasons = score_info.get("deduction_reasons", [])
+        lines.append(f"- **{dim}**: {score}/{max_s}")
+        for reason in reasons:
+            lines.append(f"  - {reason}")
+    
     lines.append("")
-    
-    # 2、符合题意检查
-    lines.append("2、符合题意检查")
-    if "conformity_check" in r:
-        cc = r["conformity_check"]
-        lines.append(f"切合题意：{'✅ 是' if cc.get('is_on_topic', True) else '❌ 否'}")
-        if cc.get("writing_techniques_used"):
-            lines.append(f"已使用：{', '.join(cc['writing_techniques_used'])}")
-        if cc.get("writing_techniques_missing"):
-            lines.append(f"缺少：{', '.join(cc['writing_techniques_missing'])}")
-        if cc.get("topic_analysis"):
-            lines.append(f"分析：{cc['topic_analysis']}")
-    lines.append("")
-    
-    # 3、分项评分
-    lines.append("3、分项评分")
-    scores = r.get("scores", {})
-    total = 0
-    max_scores = {"内容质量": 10, "语言表达": 8, "结构层次": 6, "书写规范": 4, "字数要求": 2, "卷面分": 2}
-    for dim in ["内容质量", "语言表达", "结构层次", "书写规范", "字数要求", "卷面分"]:
-        if dim in scores:
-            s = scores[dim]
-            score_val = s.get("score", 0) if isinstance(s, dict) else s
-            total += score_val
-            lines.append(f"{dim}：{score_val}/{max_scores[dim]}")
-            if isinstance(s, dict) and s.get("deduction_reasons"):
-                for reason in s["deduction_reasons"]:
-                    lines.append(f"  - {reason}")
-    lines.append("")
-    
-    # 4、详细点评
-    lines.append("4、详细点评")
-    lines.append("")
-    
-    lines.append("✅ 优点")
+    lines.append("### 亮点")
     for h in r.get("highlights", []):
-        if isinstance(h, dict):
-            lines.append(f"• {h.get('point', '亮点')}：{h.get('detail', '')}")
-            if h.get("example"):
-                lines.append(f"  > {h['example']}")
-        else:
-            lines.append(f"• {h}")
-    lines.append("")
+        lines.append(f"- **{h.get('point', 'N/A')}**: {h.get('detail', 'N/A')}")
     
-    lines.append("⚠ 不足之处")
+    lines.append("")
+    lines.append("### 不足之处")
     for issue in r.get("issues", []):
-        if isinstance(issue, dict):
-            lines.append(f"• {issue.get('point', '问题')}：{issue.get('detail', '')}")
-            if issue.get("deduction"):
-                lines.append(f"  扣分：{issue['deduction']}")
-            if issue.get("example"):
-                lines.append(f"  > {issue['example']}")
-        else:
-            lines.append(f"• {issue}")
-    lines.append("")
-    
-    # 5、总分及总结
-    final_total = r.get("total_score", total)
-    final_grade = r.get("grade", "三类文·中等")
-    lines.append("5、总分及总结")
-    lines.append(f"**{final_total} / 32 分（{final_grade}）**")
-    lines.append("")
-    
-    if r.get("summary"):
-        lines.append(r["summary"])
+        lines.append(f"- **{issue.get('point', 'N/A')}** ({issue.get('deduction', 'N/A')}): {issue.get('detail', 'N/A')}")
     
     lines.append("")
-    lines.append("---")
-    lines.append(f"⏱️ {result.get('elapsed_seconds', 0)}秒 | KIMI-2.5 多模态识图评分")
+    lines.append(f"### 总结评语\n{r.get('summary', 'N/A')}")
     
     return "\n".join(lines)
 
 
 def format_expert_report(results):
-    """格式化专家模式报告"""
-    lines = []
-    lines.append("📝 小学作文评分分析（专家模式）")
-    lines.append("")
-    
+    """格式化专家模式最终报告（简洁版，给普通用户看）"""
     kimi_result = results.get("kimi", {}).get("result", {})
     doubao_result = results.get("doubao", {}).get("result", {})
     arbitration = results.get("arbitration", {}).get("result", {})
     
-    # 1、字数统计
-    char_count = kimi_result.get("char_count", 0) or results.get("essay_length", 0)
-    word_status = "✅ 符合要求" if char_count >= 400 else f"❌ 不足（差{400 - char_count}字）"
-    lines.append("1、字数统计")
-    lines.append(f"约 {char_count} 字（要求 400 字左右）{word_status}")
+    char_count = results.get("essay_length", 0)
+    
+    lines = []
+    lines.append(f"## 📊 评分结果\n")
+    lines.append(f"**题目**: {arbitration.get('conformity_check', {}).get('topic_analysis', kimi_result.get('essay_title', 'N/A'))}")
+    lines.append(f"**字数**: 约 {char_count} 字")
+    lines.append(f"**最终评分**: {arbitration.get('final_total', 'N/A')} 分 ({arbitration.get('final_grade', 'N/A')})")
     lines.append("")
     
-    # 2、符合题意检查
-    lines.append("2、符合题意检查")
-    cc = arbitration.get("conformity_check", kimi_result.get("conformity_check", {}))
-    lines.append(f"切合题意：{'✅ 是' if cc.get('is_on_topic', True) else '❌ 否'}")
-    if cc.get("writing_techniques_used"):
-        lines.append(f"已使用：{', '.join(cc['writing_techniques_used'])}")
-    if cc.get("writing_techniques_missing"):
-        lines.append(f"缺少：{', '.join(cc['writing_techniques_missing'])}")
-    if cc.get("topic_analysis"):
-        lines.append(f"分析：{cc['topic_analysis']}")
-    lines.append("")
-    
-    # 3、分项评分
-    lines.append("3、分项评分")
-    
-    kimi_has_result = "scores" in kimi_result or "total_score" in kimi_result
-    doubao_has_result = "scores" in doubao_result or "total_score" in doubao_result
-    
+    # 仲裁评分详情
     final_scores = arbitration.get("final_scores", {})
-    
-    for dim in ["内容质量", "语言表达", "结构层次", "书写规范", "字数要求", "卷面分"]:
-        if kimi_has_result:
-            ks = kimi_result.get("scores", {}).get(dim, {})
-            k_val = ks.get("score", 0) if isinstance(ks, dict) else ks
-            k_str = str(k_val)
-        else:
-            k_str = "N/A"
-        
-        if doubao_has_result:
-            ds = doubao_result.get("scores", {}).get(dim, {})
-            d_val = ds.get("score", 0) if isinstance(ds, dict) else ds
-            d_str = str(d_val)
-        else:
-            d_str = "N/A"
-        
-        fs = final_scores.get(dim, {})
-        f_val = fs.get("score", 0) if isinstance(fs, dict) else fs
-        
-        lines.append(f"{dim}：KIMI {k_str}分 | 豆包 {d_str}分 | 最终 {f_val}分")
+    lines.append("### 各项得分")
+    max_scores = {"内容质量": 10, "语言表达": 8, "结构层次": 6, "书写规范": 4, "字数要求": 2}
+    for dim, max_s in max_scores.items():
+        score_info = final_scores.get(dim, {})
+        score = score_info.get("score", "N/A")
+        lines.append(f"- **{dim}**: {score}/{max_s}")
     
     lines.append("")
-    
-    # 4、详细点评
-    lines.append("4、详细点评")
-    lines.append("")
-    
-    lines.append("✅ 优点")
-    for h in arbitration.get("highlights", kimi_result.get("highlights", [])):
-        if isinstance(h, dict):
-            lines.append(f"• {h.get('point', '亮点')}：{h.get('detail', '')}")
-            if h.get("example"):
-                lines.append(f"  > {h['example']}")
-    lines.append("")
-    
-    lines.append("⚠ 不足之处")
-    for issue in arbitration.get("issues", kimi_result.get("issues", [])):
-        if isinstance(issue, dict):
-            lines.append(f"• {issue.get('point', '问题')}：{issue.get('detail', '')}")
-            if issue.get("deduction"):
-                lines.append(f"  扣分：{issue['deduction']}")
-            if issue.get("example"):
-                lines.append(f"  > {issue['example']}")
-    lines.append("")
-    
-    # 5、总分及总结
-    final_total = arbitration.get("final_total", kimi_result.get("total_score", 0))
-    final_grade = arbitration.get("final_grade", kimi_result.get("grade", "三类文·中等"))
-    
-    kimi_score = kimi_result.get("total_score", "N/A")
-    doubao_score = doubao_result.get("total_score", "N/A")
-    
-    lines.append("5、总分及总结")
-    lines.append(f"KIMI：{kimi_score}分 | 豆包：{doubao_score}分")
-    lines.append(f"**最终得分：{final_total} / 32 分（{final_grade}）**")
-    lines.append("")
-    
-    if arbitration.get("summary"):
-        lines.append(arbitration["summary"])
+    lines.append("### ✨ 亮点")
+    for h in arbitration.get("highlights", []):
+        lines.append(f"- **{h.get('point', 'N/A')}**: {h.get('detail', 'N/A')}")
     
     lines.append("")
-    
-    # 6、不同专家的打分及差异及评审意见
-    lines.append("6、不同专家的打分及差异及评审意见")
-    lines.append("")
-    
-    # KIMI 评审意见
-    lines.append(f"【KIMI】评分：{kimi_score}分")
-    if kimi_has_result and kimi_score != "N/A":
-        if kimi_result.get("issues"):
-            lines.append("主要问题：")
-            for issue in kimi_result.get("issues", [])[:3]:
-                if isinstance(issue, dict):
-                    lines.append(f"  • {issue.get('point', '')}：{issue.get('detail', '')}")
-        if kimi_result.get("highlights"):
-            lines.append("亮点：")
-            for h in kimi_result.get("highlights", [])[:2]:
-                if isinstance(h, dict):
-                    lines.append(f"  • {h.get('point', '')}：{h.get('detail', '')}")
-    else:
-        lines.append("（未返回有效评分结果）")
-    lines.append("")
-    
-    # 豆包评审意见
-    lines.append(f"【豆包】评分：{doubao_score}分")
-    if doubao_has_result and doubao_score != "N/A":
-        if doubao_result.get("issues"):
-            lines.append("主要问题：")
-            for issue in doubao_result.get("issues", [])[:3]:
-                if isinstance(issue, dict):
-                    lines.append(f"  • {issue.get('point', '')}：{issue.get('detail', '')}")
-        if doubao_result.get("highlights"):
-            lines.append("亮点：")
-            for h in doubao_result.get("highlights", [])[:2]:
-                if isinstance(h, dict):
-                    lines.append(f"  • {h.get('point', '')}：{h.get('detail', '')}")
-    else:
-        lines.append("（未返回有效评分结果）")
-    lines.append("")
-    
-    # 差异分析
-    comparison = arbitration.get("comparison", {})
-    if comparison:
-        lines.append("【差异分析】")
-        if comparison.get("key_differences"):
-            for diff in comparison.get("key_differences", []):
-                lines.append(f"  • {diff}")
-    lines.append("")
-    
-    # Kimi 仲裁意见
-    if arbitration.get("arbitration_reason"):
-        lines.append("【GLM-5 仲裁意见】")
-        lines.append(arbitration["arbitration_reason"])
+    lines.append("### ⚠️ 不足之处")
+    for issue in arbitration.get("issues", []):
+        lines.append(f"- **{issue.get('point', 'N/A')}** (扣分: {issue.get('deduction', '')}): {issue.get('detail', 'N/A')}")
     
     lines.append("")
-    lines.append("---")
-    summary = results.get("summary", {})
-    lines.append(f"⏱️ {summary.get('total_time_seconds', 0)}秒 | {summary.get('total_tokens', 0)} tokens")
+    lines.append(f"### 📝 总结\n{arbitration.get('summary', 'N/A')}")
     
     return "\n".join(lines)
 
 
 def normal_grade_image(image_path, requirements=None, essay_title=None):
-    """普通模式：KIMI-2.5 多模态识图直接评分"""
-    print(f"📝 KIMI-2.5 多模态识图评分中...")
-    
+    """普通模式：单模型 KIMI 识图评分"""
     result = kimi_grade_image(image_path, requirements, essay_title)
     
     if "error" in result:
@@ -720,10 +470,7 @@ def normal_grade_image(image_path, requirements=None, essay_title=None):
 
 
 def expert_grade_image(image_path, requirements=None, essay_title=None):
-    """专家模式：KIMI识图评分 || 豆包Vision识图评分 → GLM-5仲裁
-    
-    并行优化：KIMI和豆包Vision同时识图评分，最后GLM-5仲裁
-    """
+    """专家模式：KIMI识图评分 + 豆包Vision评分 → DeepSeek仲裁"""
     import concurrent.futures
     
     start_time = time.time()
@@ -736,7 +483,6 @@ def expert_grade_image(image_path, requirements=None, essay_title=None):
         "summary": {}
     }
     
-    # 第一步：KIMI 和 豆包 Vision 并行识图评分
     print("📝 KIMI-2.5 和 豆包 Vision 并行识图评分中...")
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -752,19 +498,20 @@ def expert_grade_image(image_path, requirements=None, essay_title=None):
     print(f"   KIMI 完成，耗时 {kimi_result.get('elapsed_seconds', 0)}s")
     print(f"   豆包 Vision 完成，耗时 {doubao_result.get('elapsed_seconds', 0)}s")
     
-    # 获取作文正文（优先用 KIMI 的，因为中文识别可能更准确）
+    # 获取作文正文
     essay_text = kimi_result.get("result", {}).get("essay_text", "")
     if not essay_text:
         essay_text = doubao_result.get("result", {}).get("essay_text", "")
     results["essay_length"] = len(essay_text) if essay_text else 0
     
-    # 第二步：GLM-5 仲裁
-    print("⚖️ GLM-5 仲裁中...")
-    arbitration = glm5_arbitrate(
+    # DeepSeek 仲裁
+    print("⚖️ DeepSeek-V3.2 仲裁中...")
+    arbitration = deepseek_arbitrate(
         kimi_result.get("result", {}),
         doubao_result.get("result", {}),
         essay_text,
-        requirements
+        requirements,
+        essay_title
     )
     results["arbitration"] = arbitration
     print(f"   完成，耗时 {arbitration.get('elapsed_seconds', 0)}s")
@@ -790,20 +537,10 @@ def expert_grade_image(image_path, requirements=None, essay_title=None):
 
 
 def send_feishu_card(title, content, color="blue"):
-    """发送飞书卡片消息
-    
-    Args:
-        title: 卡片标题
-        content: 卡片正文（支持 lark_md 格式）
-        color: 标题栏颜色 (blue/green/red/orange/purple/grey)
-    
-    Returns:
-        bool: 是否发送成功
-    """
+    """发送飞书卡片消息"""
     import os
     from pathlib import Path
     
-    # 从 .env 读取飞书配置
     env_vars = {}
     env_path = Path.home() / ".hermes" / ".env"
     if env_path.exists():
@@ -867,6 +604,52 @@ def send_feishu_card(title, content, color="blue"):
         return False
 
 
+def send_feishu_message(token, receive_id, message):
+    """发送飞书纯文本消息（自动判断是否需要卡片格式）"""
+    has_table = ('|' in message and ('---' in message or '───' in message)) or \
+                ('维度' in message and 'KIMI' in message and '豆包' in message)
+    
+    if has_table:
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "📊 评分结果"},
+                "template": "blue"
+            },
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": message}}
+            ]
+        }
+        msg_type = "interactive"
+        content = json.dumps(card)
+    else:
+        msg_type = "text"
+        content = json.dumps({"text": message})
+    
+    url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
+    data = json.dumps({
+        "receive_id": receive_id,
+        "msg_type": msg_type,
+        "content": content
+    }).encode()
+    req = urllib.request.Request(url, data=data, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    })
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read())
+        if result.get('code') == 0:
+            print("飞书消息发送成功" + ("（卡片格式）" if has_table else "（纯文本）"))
+            return True
+        else:
+            print(f"飞书消息发送失败: {result}")
+            return False
+    except Exception as e:
+        print(f"发送飞书消息出错: {e}")
+        return False
+
+
 def format_expert_report_for_feishu(results):
     """格式化专家模式报告为飞书卡片格式（lark_md）"""
     kimi_result = results.get("kimi", {}).get("result", {})
@@ -891,95 +674,68 @@ def format_expert_report_for_feishu(results):
         lines.append(f"缺少：{', '.join(cc['writing_techniques_missing'])}")
     lines.append("")
     
-    # 3、分项评分
-    lines.append("**3、分项评分**")
+    # 3、各项得分（仲裁结果）
     final_scores = arbitration.get("final_scores", {})
+    max_scores = {"内容质量": 10, "语言表达": 8, "结构层次": 6, "书写规范": 4, "字数要求": 2}
+    lines.append("**3、各项得分（仲裁）**")
     
-    kimi_score = kimi_result.get("total_score", "N/A")
-    doubao_score = doubao_result.get("total_score", "N/A")
+    score_table = "| 维度 | 分值 | 得分 |\n|------|------|------|"
+    detail_lines = []
+    for dim, max_s in max_scores.items():
+        score_info = final_scores.get(dim, {})
+        score = score_info.get("score", "N/A")
+        score_table += f"\n| {dim} |/{max_s} | {score} |"
+        reasons = score_info.get("deduction_reasons", [])
+        if reasons:
+            detail_lines.append(f"**{dim}** 扣分原因：{'；'.join(reasons)}")
     
-    for dim in ["内容质量", "语言表达", "结构层次", "书写规范", "字数要求", "卷面分"]:
-        ks = kimi_result.get("scores", {}).get(dim, {})
-        k_val = ks.get("score", 0) if isinstance(ks, dict) else ks
-        
-        ds = doubao_result.get("scores", {}).get(dim, {})
-        d_val = ds.get("score", 0) if isinstance(ds, dict) else ds
-        
-        fs = final_scores.get(dim, {})
-        f_val = fs.get("score", 0) if isinstance(fs, dict) else fs
-        
-        lines.append(f"• {dim}：KIMI {k_val}分 | 豆包 {d_val}分 | **最终 {f_val}分**")
+    lines.append(score_table)
     lines.append("")
     
-    # 4、详细点评
-    lines.append("**4、详细点评**\n")
-    
-    lines.append("✅ **优点**")
-    for h in arbitration.get("highlights", kimi_result.get("highlights", []))[:3]:
-        if isinstance(h, dict):
-            lines.append(f"• {h.get('point', '')}：{h.get('detail', '')}")
+    for dl in detail_lines:
+        lines.append(dl)
     lines.append("")
     
-    lines.append("⚠️ **不足之处**")
-    for issue in arbitration.get("issues", kimi_result.get("issues", []))[:3]:
-        if isinstance(issue, dict):
-            lines.append(f"• {issue.get('point', '')}：{issue.get('detail', '')}")
+    # 4、总分
+    lines.append(f"**4、总分**\n最终评分：**{arbitration.get('final_total', 'N/A')}** 分（{arbitration.get('final_grade', 'N/A')}）")
     lines.append("")
     
-    # 5、总分及总结
-    final_total = arbitration.get("final_total", kimi_result.get("total_score", 0))
-    final_grade = arbitration.get("final_grade", kimi_result.get("grade", "三类文·中等"))
+    # 5、亮点
+    highlights = arbitration.get("highlights", kimi_result.get("highlights", []))
+    if highlights:
+        lines.append("**5、✨ 亮点**")
+        for h in highlights[:2]:
+            lines.append(f"- **{h.get('point', '')}**：{h.get('detail', '')}")
+        lines.append("")
     
-    lines.append(f"**5、总分及总结**")
-    lines.append(f"KIMI：{kimi_score}分 | 豆包：{doubao_score}分")
-    lines.append(f"**最终得分：{final_total} / 32 分（{final_grade}）**\n")
+    # 6、不足之处
+    issues = arbitration.get("issues", kimi_result.get("issues", []))
+    if issues:
+        lines.append("**6、⚠️ 不足之处**")
+        for issue in issues[:3]:
+            lines.append(f"- **{issue.get('point', '')}**（扣分：{issue.get('deduction', '')}）")
+        lines.append("")
     
+    # 7、仲裁说明
+    if arbitration.get("arbitration_reason"):
+        lines.append(f"**7、⚖️ 仲裁说明**\n{arbitration.get('arbitration_reason', '')}")
+        lines.append("")
+    
+    # 8、总结评语
     if arbitration.get("summary"):
-        lines.append(arbitration["summary"])
-    
-    lines.append(f"\n---\n⏱️ {summary.get('total_time_seconds', 0)}秒 | {summary.get('total_tokens', 0)} tokens")
+        lines.append(f"**8、📝 总结评语**\n{arbitration.get('summary', '')}")
     
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
     import sys
-    
     if len(sys.argv) < 2:
-        print("用法: python essay_grader_v2.py <图片路径> [--expert] [--no-feishu]")
+        print("用法: python essay_grader_v2.py <作文图片路径> [题目标题]")
         sys.exit(1)
     
     image_path = sys.argv[1]
-    expert_mode = "--expert" in sys.argv
-    no_feishu = "--no-feishu" in sys.argv
+    essay_title = sys.argv[2] if len(sys.argv) > 2 else "我身边的英雄"
     
-    if expert_mode:
-        report, results = expert_grade_image(image_path)
-        print("\n" + report)
-        
-        with open("/tmp/essay_expert_result.json", "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
-        print("\n详细结果已保存至 /tmp/essay_expert_result.json")
-        
-        # 发送飞书卡片消息
-        if not no_feishu:
-            final_grade = results.get("summary", {}).get("final_grade", "三类文·中等")
-            # 根据等级选择颜色
-            color_map = {
-                "一类文": "green",
-                "二类文": "blue", 
-                "三类文": "orange",
-                "四类文": "red",
-                "五类文": "red"
-            }
-            color = "blue"
-            for key, c in color_map.items():
-                if key in final_grade:
-                    color = c
-                    break
-            
-            card_content = format_expert_report_for_feishu(results)
-            send_feishu_card("📝 小学作文评分分析（专家模式）", card_content, color)
-    else:
-        report = normal_grade_image(image_path)
-        print("\n" + report)
+    report, results = expert_grade_image(image_path, essay_title=essay_title)
+    print("\n" + report)
