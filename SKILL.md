@@ -1,22 +1,23 @@
 ---
 name: essay-grading
-description: 小学作文评分分析 - 多模态识图评分，支持普通模式和专家模式（并行优化）
+description: 小学作文评分分析 - 多模态识图评分，支持普通模式和专家模式（并行优化），自动发送飞书卡片
 trigger: 当用户提供作文图片（手写或打印）并要求评分、批改、分析时
-version: 3.0
+version: 3.1
 author: Hermes
 created: 2026-04-18
 updated: 2026-04-20
 ---
 
-# 小学作文评分技能 v3.0
+# 小学作文评分技能 v3.1
 
 按标准评分细则对小学作文进行专业评分，支持多模态识图和并行评分优化。
 
-## 核心更新（v3.0）
+## 核心更新（v3.1）
 
 1. **多模态识图**：直接从图片识别并评分，无需单独 OCR
 2. **并行优化**：专家模式 KIMI 和豆包 Vision 并行识图，速度提升 ~30%
 3. **新增卷面分**：评分维度从 5 项增至 6 项（满分 32 分）
+4. **飞书卡片消息**：专家模式自动发送飞书卡片消息，根据等级显示不同颜色
 
 ## 快速使用
 
@@ -25,9 +26,14 @@ updated: 2026-04-20
 python3 ~/.hermes/skills/productivity/essay-grading/scripts/essay_grader_v2.py <图片路径>
 ```
 
-### 专家模式（并行多模型 + 仲裁）
+### 专家模式（并行多模型 + 仲裁 + 飞书卡片）
 ```bash
 python3 ~/.hermes/skills/productivity/essay-grading/scripts/essay_grader_v2.py <图片路径> --expert
+```
+
+### 专家模式（不发送飞书）
+```bash
+python3 ~/.hermes/skills/productivity/essay-grading/scripts/essay_grader_v2.py <图片路径> --expert --no-feishu
 ```
 
 ## 评分策略
@@ -50,6 +56,8 @@ KIMI-2.5 多模态识图 → 直接输出评分结果
         GLM-5 仲裁
               ↓
         最终评分结果
+              ↓
+     飞书卡片消息（自动发送）
 ```
 
 ## 评分标准（满分32分）
@@ -82,6 +90,18 @@ KIMI-2.5 多模态识图 → 直接输出评分结果
 5. 总分及总结
 6. （专家模式）不同专家的打分及差异及评审意见
 
+## 飞书卡片消息
+
+专家模式评分完成后自动发送飞书卡片消息，特点：
+
+1. **卡片格式**：使用 `msg_type: "interactive"` 卡片消息
+2. **颜色区分等级**：
+   - 一类文 → 绿色 (green)
+   - 二类文 → 蓝色 (blue)
+   - 三类文 → 橙色 (orange)
+   - 四类文/五类文 → 红色 (red)
+3. **格式优化**：使用 lark_md 格式，加粗关键词，支持 emoji
+
 ## 重要注意事项
 
 1. **飞书输出**：⚠️ terminal 输出不会发送到飞书，必须直接在回复中输出内容
@@ -89,6 +109,7 @@ KIMI-2.5 多模态识图 → 直接输出评分结果
 3. **题目示例**：题目示例的人物都符合题意，不能主观判定偏题
 4. **JSON解析**：GLM-5 可能返回被 \`\`\`json...\`\`\` 包裹的JSON，需要先去除代码块标记
 5. **并行实现**：使用 `concurrent.futures.ThreadPoolExecutor` 并行调用多模态模型
+6. **表格格式**：飞书纯文本不支持表格，使用逐行格式如 `内容质量：KIMI 7分 | 豆包 6分 | 最终 7分`
 
 ## 文件结构
 
@@ -96,7 +117,7 @@ KIMI-2.5 多模态识图 → 直接输出评分结果
 essay-grading/
 ├── SKILL.md                    # 本文件（核心说明）
 ├── scripts/
-│   ├── essay_grader_v2.py      # 主评分脚本 v2（多模态+并行）
+│   ├── essay_grader_v2.py      # 主评分脚本 v2（多模态+并行+飞书卡片）
 │   ├── essay_grader.py         # 旧版（文本输入）
 │   └── expert_mode.py          # 专家模式（旧版）
 ├── references/

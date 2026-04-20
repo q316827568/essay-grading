@@ -9,6 +9,7 @@ import json
 import time
 import re
 import base64
+import urllib.request
 from datetime import datetime
 from openai import OpenAI
 
@@ -585,9 +586,6 @@ def format_expert_report(results):
     
     final_scores = arbitration.get("final_scores", {})
     
-    lines.append(f"{'维度':<8} {'KIMI':>6} {'豆包':>6} {'最终':>6}")
-    lines.append("-" * 30)
-    
     for dim in ["内容质量", "语言表达", "结构层次", "书写规范", "字数要求", "卷面分"]:
         if kimi_has_result:
             ks = kimi_result.get("scores", {}).get(dim, {})
@@ -606,7 +604,7 @@ def format_expert_report(results):
         fs = final_scores.get(dim, {})
         f_val = fs.get("score", 0) if isinstance(fs, dict) else fs
         
-        lines.append(f"{dim:<8} {k_str:>6} {d_str:>6} {f_val:>6}")
+        lines.append(f"{dim}：KIMI {k_str}分 | 豆包 {d_str}分 | 最终 {f_val}分")
     
     lines.append("")
     
@@ -791,15 +789,169 @@ def expert_grade_image(image_path, requirements=None, essay_title=None):
     return format_expert_report(results), results
 
 
+def send_feishu_card(title, content, color="blue"):
+    """发送飞书卡片消息
+    
+    Args:
+        title: 卡片标题
+        content: 卡片正文（支持 lark_md 格式）
+        color: 标题栏颜色 (blue/green/red/orange/purple/grey)
+    
+    Returns:
+        bool: 是否发送成功
+    """
+    import os
+    from pathlib import Path
+    
+    # 从 .env 读取飞书配置
+    env_vars = {}
+    env_path = Path.home() / ".hermes" / ".env"
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                if '=' in line and not line.startswith('#'):
+                    k, v = line.strip().split('=', 1)
+                    env_vars[k] = v
+    
+    app_id = env_vars.get('FEISHU_APP_ID', '')
+    app_secret = env_vars.get('FEISHU_APP_SECRET', '')
+    home_channel = env_vars.get('FEISHU_HOME_CHANNEL', '')
+    
+    if not all([app_id, app_secret, home_channel]):
+        print("飞书配置缺失，跳过发送")
+        return False
+    
+    try:
+        # 获取 tenant_access_token
+        url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        data = json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        resp = urllib.request.urlopen(req, timeout=10)
+        token = json.loads(resp.read())['tenant_access_token']
+        
+        # 构建卡片消息
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": color
+            },
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": content}}
+            ]
+        }
+        
+        # 发送消息
+        url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
+        data = json.dumps({
+            "receive_id": home_channel,
+            "msg_type": "interactive",
+            "content": json.dumps(card)
+        }).encode()
+        req = urllib.request.Request(url, data=data, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        })
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read())
+        
+        if result.get('code') == 0:
+            print("飞书卡片消息发送成功")
+            return True
+        else:
+            print(f"飞书卡片消息发送失败: {result}")
+            return False
+            
+    except Exception as e:
+        print(f"发送飞书卡片消息出错: {e}")
+        return False
+
+
+def format_expert_report_for_feishu(results):
+    """格式化专家模式报告为飞书卡片格式（lark_md）"""
+    kimi_result = results.get("kimi", {}).get("result", {})
+    doubao_result = results.get("doubao", {}).get("result", {})
+    arbitration = results.get("arbitration", {}).get("result", {})
+    summary = results.get("summary", {})
+    
+    lines = []
+    
+    # 1、字数统计
+    char_count = kimi_result.get("char_count", 0) or results.get("essay_length", 0)
+    word_status = "✅ 符合要求" if char_count >= 400 else f"❌ 不足（差{400 - char_count}字）"
+    lines.append(f"**1、字数统计**\n约 {char_count} 字（要求 400 字左右）{word_status}\n")
+    
+    # 2、符合题意检查
+    cc = arbitration.get("conformity_check", kimi_result.get("conformity_check", {}))
+    lines.append(f"**2、符合题意检查**")
+    lines.append(f"切合题意：{'✅ 是' if cc.get('is_on_topic', True) else '❌ 否'}")
+    if cc.get("writing_techniques_used"):
+        lines.append(f"已使用：{', '.join(cc['writing_techniques_used'])}")
+    if cc.get("writing_techniques_missing"):
+        lines.append(f"缺少：{', '.join(cc['writing_techniques_missing'])}")
+    lines.append("")
+    
+    # 3、分项评分
+    lines.append("**3、分项评分**")
+    final_scores = arbitration.get("final_scores", {})
+    
+    kimi_score = kimi_result.get("total_score", "N/A")
+    doubao_score = doubao_result.get("total_score", "N/A")
+    
+    for dim in ["内容质量", "语言表达", "结构层次", "书写规范", "字数要求", "卷面分"]:
+        ks = kimi_result.get("scores", {}).get(dim, {})
+        k_val = ks.get("score", 0) if isinstance(ks, dict) else ks
+        
+        ds = doubao_result.get("scores", {}).get(dim, {})
+        d_val = ds.get("score", 0) if isinstance(ds, dict) else ds
+        
+        fs = final_scores.get(dim, {})
+        f_val = fs.get("score", 0) if isinstance(fs, dict) else fs
+        
+        lines.append(f"• {dim}：KIMI {k_val}分 | 豆包 {d_val}分 | **最终 {f_val}分**")
+    lines.append("")
+    
+    # 4、详细点评
+    lines.append("**4、详细点评**\n")
+    
+    lines.append("✅ **优点**")
+    for h in arbitration.get("highlights", kimi_result.get("highlights", []))[:3]:
+        if isinstance(h, dict):
+            lines.append(f"• {h.get('point', '')}：{h.get('detail', '')}")
+    lines.append("")
+    
+    lines.append("⚠️ **不足之处**")
+    for issue in arbitration.get("issues", kimi_result.get("issues", []))[:3]:
+        if isinstance(issue, dict):
+            lines.append(f"• {issue.get('point', '')}：{issue.get('detail', '')}")
+    lines.append("")
+    
+    # 5、总分及总结
+    final_total = arbitration.get("final_total", kimi_result.get("total_score", 0))
+    final_grade = arbitration.get("final_grade", kimi_result.get("grade", "三类文·中等"))
+    
+    lines.append(f"**5、总分及总结**")
+    lines.append(f"KIMI：{kimi_score}分 | 豆包：{doubao_score}分")
+    lines.append(f"**最终得分：{final_total} / 32 分（{final_grade}）**\n")
+    
+    if arbitration.get("summary"):
+        lines.append(arbitration["summary"])
+    
+    lines.append(f"\n---\n⏱️ {summary.get('total_time_seconds', 0)}秒 | {summary.get('total_tokens', 0)} tokens")
+    
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     import sys
     
     if len(sys.argv) < 2:
-        print("用法: python essay_grader_v2.py <图片路径> [--expert]")
+        print("用法: python essay_grader_v2.py <图片路径> [--expert] [--no-feishu]")
         sys.exit(1)
     
     image_path = sys.argv[1]
     expert_mode = "--expert" in sys.argv
+    no_feishu = "--no-feishu" in sys.argv
     
     if expert_mode:
         report, results = expert_grade_image(image_path)
@@ -808,6 +960,26 @@ if __name__ == "__main__":
         with open("/tmp/essay_expert_result.json", "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
         print("\n详细结果已保存至 /tmp/essay_expert_result.json")
+        
+        # 发送飞书卡片消息
+        if not no_feishu:
+            final_grade = results.get("summary", {}).get("final_grade", "三类文·中等")
+            # 根据等级选择颜色
+            color_map = {
+                "一类文": "green",
+                "二类文": "blue", 
+                "三类文": "orange",
+                "四类文": "red",
+                "五类文": "red"
+            }
+            color = "blue"
+            for key, c in color_map.items():
+                if key in final_grade:
+                    color = c
+                    break
+            
+            card_content = format_expert_report_for_feishu(results)
+            send_feishu_card("📝 小学作文评分分析（专家模式）", card_content, color)
     else:
         report = normal_grade_image(image_path)
         print("\n" + report)
